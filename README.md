@@ -58,6 +58,7 @@ Given structured insurance claim information available at assessment time, estim
 - scikit-learn for validation, preprocessing, models, calibration, and metrics
 - imbalanced-learn for the fold-local SMOTE experiment
 - XGBoost for the optional experimental comparison
+- `google-genai` for optional investigator summaries grounded in verified model outputs
 - SHAP for global and local model explanations
 - Streamlit for the dashboard
 - joblib for versioned model serialization
@@ -214,7 +215,10 @@ The entrypoint is [app/app.py](app/app.py). It provides:
 - **Model performance:** confusion matrix, ROC, precision-recall, calibration, and saved metrics.
 - **Data quality:** missing-token counts, duplicates, validation warnings, and missing-value summaries.
 
-The UI labels outputs as risk assessments for investigation prioritisation. It does not call Gemini, an LLM, or an external generative-AI service.
+The UI labels outputs as risk assessments for investigation prioritisation. When
+`GEMINI_API_KEY` is configured in Streamlit secrets, the optional Gemini summary
+uses only the saved prediction and verified SHAP contributions. Without the key,
+the deterministic rule-based summary remains available.
 
 ## Repository structure
 
@@ -251,7 +255,18 @@ If PowerShell blocks activation, use the environment interpreter directly:
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-No API key, credential, or `.env` file is required.
+No API key is required for the ML dashboard or rule-based explanations. An
+optional `GEMINI_API_KEY` Streamlit secret enables Gemini investigator summaries.
+
+For local Streamlit use, create `.streamlit/secrets.toml` (do not commit it):
+
+```toml
+GEMINI_API_KEY = "your-key-here"
+```
+
+For Streamlit Community Cloud, add the same key under the app's **Settings →
+Secrets** panel. The key is read through `st.secrets` and is never displayed or
+logged.
 
 ## Running the project
 

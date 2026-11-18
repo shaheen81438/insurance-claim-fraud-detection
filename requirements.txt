@@ -9,3 +9,8 @@ streamlit
 jupyter
 ipykernel
 requests
+joblib
+imbalanced-learn
+pytest
+google-genai
+plotly

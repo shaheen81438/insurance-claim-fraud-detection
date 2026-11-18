@@ -1,511 +1,472 @@
-"""
-Insurance Claim Risk Detection - Streamlit App
-Loads the model trained in notebook 04, scores uploaded claims,
-explains predictions with SHAP, and generates a plain-English
-investigator summary using an LLM (GitHub Models - free with a GitHub account).
-"""
+"""Premium Streamlit workspace for insurance claim risk assessment."""
 
-import os
-import io
-import json
-import joblib
-import numpy as np
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
-import shap
-import matplotlib.pyplot as plt
-import requests
 
-# ---------------------------------------------------------------------------
-# Page setup + visual theme
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="Insurance Claim Risk Detection", layout="wide", page_icon="🔍")
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap');
+from src.data_validation import RAW_COLUMNS, TARGET_COLUMN, validate_claims
+from src.explainability import explain_claims, plain_language_explanation, risk_category
+from src.gemini_explanation import GeminiResult, generate_investigator_summary
+from src.predict import load_bundle, predict_claims
 
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+ARTIFACT = ROOT / "models" / "claim_risk_pipeline_v2.joblib"
+DATASET = ROOT / "data" / "insurance_claims.csv"
+REPORTS = ROOT / "reports" / "checkpoint_c_v2"
+THRESHOLD = 0.18
 
-/* App background */
-.stApp { background-color: #F7F8FC; }
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background-color: #101C36;
-}
-section[data-testid="stSidebar"] * { color: #E6E9F5 !important; }
-section[data-testid="stSidebar"] .stFileUploader label { color: #E6E9F5 !important; }
-
-/* The uploaded-file card itself has a white background, so its text must stay dark */
-section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"],
-section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"] * {
-    color: #1B2A4A !important;
-}
-section[data-testid="stSidebar"] [data-testid="stFileUploaderFileData"] * {
-    color: #1B2A4A !important;
-}
-section[data-testid="stSidebar"] small { color: #6B7280 !important; }
-
-/* The whole drop zone (including "Drag and drop" text, size limit caption,
-   and the "Browse files" button) also sits on a light card - keep it dark text */
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"],
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] * {
-    color: #1B2A4A !important;
-}
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {
-    background-color: #EFF2FA !important;
-    border: 1px solid #D6DCEF !important;
-}
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button,
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button p,
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button span {
-    color: #1B2A4A !important;
-    font-weight: 700 !important;
-    opacity: 1 !important;
-}
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button svg {
-    fill: #1B2A4A !important;
-}
-
-/* Fix uploaded-file row contrast (white card was swallowing the light text) */
-section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"],
-section[data-testid="stSidebar"] [data-testid="stFileUploaderFileName"],
-section[data-testid="stSidebar"] div[data-testid="stFileUploaderFile"] > div {
-    background-color: #1B2A4A !important;
-    border-radius: 8px;
-}
-section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"] * {
-    color: #E6E9F5 !important;
-}
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
-    background-color: #16233F !important;
-    border: 1px dashed #3A4A70 !important;
-}
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] * {
-    color: #E6E9F5 !important;
-}
-section[data-testid="stSidebar"] small { color: #9AA6C4 !important; }
-
-/* Hero banner */
-.hero {
-    background: linear-gradient(135deg, #101C36 0%, #1B2A4A 60%, #24365F 100%);
-    padding: 2.2rem 2.4rem;
-    border-radius: 14px;
-    margin-bottom: 1.6rem;
-}
-.hero h1 {
-    font-family: 'Fraunces', serif;
-    font-weight: 600;
-    font-size: 2.3rem;
-    color: #FFFFFF;
-    margin: 0 0 0.4rem 0;
-}
-.hero p {
-    color: #AEB8D6;
-    font-size: 1.02rem;
-    margin: 0;
-    max-width: 760px;
-}
-.hero .eyebrow {
-    color: #6C8CFF;
-    font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin-bottom: 0.5rem;
-}
-
-/* Section headers */
-h2 {
-    font-family: 'Fraunces', serif !important;
-    font-weight: 600 !important;
-    color: #1B2A4A !important;
-    font-size: 1.5rem !important;
-    margin-top: 1.8rem !important;
-}
-h3 { color: #1B2A4A !important; font-weight: 600 !important; }
-
-/* Metric cards */
-div[data-testid="stMetric"] {
-    background-color: #FFFFFF;
-    border: 1px solid #E7EAF3;
-    border-radius: 12px;
-    padding: 1rem 1.1rem;
-    box-shadow: 0 1px 3px rgba(27,42,74,0.06);
-}
-div[data-testid="stMetricLabel"] { color: #6B7280 !important; }
-div[data-testid="stMetricValue"] { color: #1B2A4A !important; font-weight: 700 !important; }
-
-/* Dataframe */
-div[data-testid="stDataFrame"] {
-    border: 1px solid #E7EAF3;
-    border-radius: 10px;
-    overflow: hidden;
-}
-
-/* Buttons */
-.stDownloadButton button, .stButton button {
-    background-color: #2E5BFF !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 8px !important;
-    font-weight: 600 !important;
-    padding: 0.5rem 1.2rem !important;
-}
-.stDownloadButton button:hover, .stButton button:hover { background-color: #1E4BE0 !important; }
-
-/* Info / success / warning boxes */
-div[data-testid="stAlertContainer"] { border-radius: 10px; }
-
-/* Risk badge pills */
-.risk-badge {
-    display: inline-block;
-    padding: 0.3rem 0.85rem;
-    border-radius: 999px;
-    font-weight: 700;
-    font-size: 0.95rem;
-    letter-spacing: 0.02em;
-}
-.risk-high { background-color: #FDECEC; color: #C13B44; }
-.risk-medium { background-color: #FFF3DC; color: #B7791F; }
-.risk-low { background-color: #E7F6EE; color: #1E8A57; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="hero">
-    <div class="eyebrow">Fraud Risk Prototype</div>
-    <h1>🔍 Insurance Claim Risk Detection</h1>
-    <p>Upload a claims CSV to score fraud risk, see exactly why each claim was flagged,
-    and get an investigator-friendly AI explanation — powered by SHAP and Gemini.</p>
-</div>
-""", unsafe_allow_html=True)
-
-RISK_BADGE_CLASS = {"High": "risk-high", "Medium": "risk-medium", "Low": "risk-low"}
+st.set_page_config(
+    page_title="Claim intelligence",
+    page_icon=":material/shield_with_heart:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 
-def risk_badge_html(category):
-    cls = RISK_BADGE_CLASS.get(category, "risk-medium")
-    return f'<span class="risk-badge {cls}">{category} risk</span>'
+def inject_styles() -> None:
+    """Apply the high-contrast visual system used throughout the workspace."""
+
+    st.markdown(
+        """
+        <style>
+        :root {
+            --navy-950: #071426;
+            --navy-900: #0b1b33;
+            --navy-800: #112b4d;
+            --ink: #132238;
+            --muted: #53657d;
+            --line: #d9e2ee;
+            --canvas: #f4f7fb;
+            --card: #ffffff;
+            --blue: #2368d1;
+            --blue-soft: #e8f0ff;
+            --red: #c83b4b;
+            --amber: #b56a00;
+            --green: #17834b;
+        }
+
+        .stApp { background: var(--canvas); color: var(--ink); }
+        [data-testid="stHeader"] { background: transparent; }
+        [data-testid="stSidebar"] { background: var(--navy-950); border-right: 1px solid #1f3a5d; }
+        [data-testid="stSidebar"] * { color: #f4f7fb !important; }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: #c6d5e8 !important; }
+        [data-testid="stSidebar"] .stCaption p { color: #a9bdd5 !important; }
+        [data-testid="stSidebar"] [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] [data-testid="stSegmentedControl"] { background: #102844; border-color: #315277; }
+        [data-testid="stSidebar"] [data-testid="stSegmentedControl"] button { color: #dbe8f7 !important; }
+        [data-testid="stSidebar"] [data-testid="stSegmentedControl"] button[aria-checked="true"] { background: #2368d1; color: #fff !important; }
+        [data-testid="stSidebar"] hr { border-color: #294668; }
+
+        .block-container { max-width: 1500px; padding: 2.25rem 3.25rem 3.5rem; }
+        h1, h2, h3, h4 { color: var(--ink) !important; letter-spacing: -0.025em; }
+        h1 { font-size: 2rem !important; line-height: 1.15 !important; }
+        h2 { font-size: 1.45rem !important; }
+        h3 { font-size: 1.05rem !important; }
+        p, li, label, [data-testid="stCaptionContainer"] p, .stMarkdown { color: var(--ink); }
+        [data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label { color: var(--ink) !important; font-weight: 600; }
+        input, textarea, [data-baseweb="select"] > div, [data-baseweb="input"] > div { color: var(--ink) !important; background: #fff !important; border-color: var(--line) !important; }
+        [data-baseweb="select"] span { color: var(--ink) !important; }
+        [data-testid="stMetric"] { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; box-shadow: 0 5px 18px rgba(25, 55, 95, .06); min-height: 112px; }
+        [data-testid="stMetricLabel"] p { color: var(--muted) !important; font-weight: 700; font-size: .78rem; text-transform: uppercase; letter-spacing: .07em; }
+        [data-testid="stMetricValue"] { color: var(--ink) !important; font-weight: 800; }
+        [data-testid="stMetricDelta"] { color: var(--muted) !important; }
+        [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fff; }
+        [data-testid="stDataFrame"] * { color: var(--ink); }
+        .stButton > button, [data-testid="stFormSubmitButton"] button { border-radius: 9px; border: 1px solid #1b5ab9; background: var(--blue); color: #fff !important; font-weight: 700; min-height: 2.6rem; }
+        .stButton > button:hover, [data-testid="stFormSubmitButton"] button:hover { background: #174f9f; border-color: #174f9f; }
+        .stDownloadButton > button { border-radius: 9px; border: 1px solid var(--line); background: #fff; color: var(--ink) !important; font-weight: 700; }
+        [data-testid="stAlert"] { border-radius: 11px; }
+        .brand-mark { display: flex; align-items: center; gap: .7rem; padding: .3rem 0 1.25rem; }
+        .brand-icon { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border-radius: 10px; background: #2b78e4; color: #fff; font-weight: 900; font-size: 1.1rem; }
+        .brand-name { color: #fff; font-size: 1.02rem; font-weight: 800; line-height: 1.1; }
+        .brand-subtitle { color: #a9bdd5; font-size: .72rem; margin-top: .18rem; }
+        .eyebrow { color: var(--blue); font-size: .73rem; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; margin-bottom: .35rem; }
+        .page-subtitle { color: var(--muted); font-size: .95rem; margin: -.45rem 0 1.45rem; }
+        .hero { background: linear-gradient(110deg, #fff 0%, #edf4ff 100%); border: 1px solid #cfddf1; border-radius: 18px; padding: 1.6rem 1.8rem; margin-bottom: 1.25rem; box-shadow: 0 10px 28px rgba(25, 55, 95, .06); }
+        .hero h1 { margin: 0; }
+        .hero p { color: var(--muted); margin: .55rem 0 0; max-width: 860px; }
+        .section-kicker { color: var(--muted); font-size: .75rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; margin: 1.4rem 0 .6rem; }
+        .risk-badge { display: inline-block; border-radius: 999px; padding: .35rem .72rem; font-size: .78rem; font-weight: 800; letter-spacing: .04em; }
+        .risk-high { background: #ffe7ea; color: #a42536; }
+        .risk-medium { background: #fff2d8; color: #8c5200; }
+        .risk-low { background: #ddf7e9; color: #11653b; }
+        .status-pill { display: inline-block; border-radius: 999px; background: #e0f6ea; color: #106239; padding: .28rem .55rem; font-size: .72rem; font-weight: 800; }
+        .muted-card { background: #eef3f9; border: 1px solid var(--line); border-radius: 12px; padding: .9rem 1rem; color: var(--muted); }
+        @media (max-width: 900px) { .block-container { padding: 1.4rem 1rem 2.5rem; } h1 { font-size: 1.7rem !important; } }
+        @media (prefers-color-scheme: dark) { .stApp { background: #f4f7fb; } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
-
-
-# ---------------------------------------------------------------------------
-# Load model + metadata (cached so it only loads once, not on every click)
-# ---------------------------------------------------------------------------
 @st.cache_resource
-def load_model_artifacts():
-    model = joblib.load(os.path.join(MODEL_DIR, "fraud_model.pkl"))
-    feature_columns = joblib.load(os.path.join(MODEL_DIR, "feature_columns.pkl"))
-    categorical_columns = joblib.load(os.path.join(MODEL_DIR, "categorical_columns.pkl"))
-    return model, feature_columns, categorical_columns
+def get_bundle():
+    if not ARTIFACT.exists():
+        raise FileNotFoundError(f"Versioned model artifact not found: {ARTIFACT}")
+    return load_bundle(ARTIFACT)
 
 
-try:
-    model, feature_columns, categorical_columns = load_model_artifacts()
-except FileNotFoundError:
-    st.error(
-        "Model files not found in the `models/` folder. "
-        "Run notebook 04_modeling_explainability.ipynb all the way to the end first — "
-        "it saves fraud_model.pkl, feature_columns.pkl, and categorical_columns.pkl."
-    )
-    st.stop()
+@st.cache_data(show_spinner=False)
+def get_dataset() -> pd.DataFrame:
+    return pd.read_csv(DATASET)
 
 
-# ---------------------------------------------------------------------------
-# Feature engineering — MUST mirror notebook 03 exactly, or the model
-# will get columns it doesn't recognise.
-# ---------------------------------------------------------------------------
-def engineer_features(df):
-    df = df.copy()
-
-    if 'incident_date' in df.columns and 'policy_bind_date' in df.columns:
-        df['incident_date'] = pd.to_datetime(df['incident_date'], errors='coerce')
-        df['policy_bind_date'] = pd.to_datetime(df['policy_bind_date'], errors='coerce')
-        df['policy_age_days'] = (df['incident_date'] - df['policy_bind_date']).dt.days
-
-    if 'months_as_customer' in df.columns:
-        df['customer_tenure_years'] = df['months_as_customer'] / 12
-        if 'total_claim_amount' in df.columns:
-            df['claim_amount_per_tenure_year'] = df['total_claim_amount'] / \
-                df['customer_tenure_years'].replace(0, 0.1)
-
-    if 'total_claim_amount' in df.columns:
-        threshold = df['total_claim_amount'].quantile(0.90)
-        df['is_high_value_claim'] = (df['total_claim_amount'] >= threshold).astype(int)
-
-    for part, total_col in [('vehicle_claim', 'total_claim_amount'),
-                             ('injury_claim', 'total_claim_amount'),
-                             ('property_claim', 'total_claim_amount')]:
-        if part in df.columns and total_col in df.columns:
-            df[f'{part}_ratio'] = df[part] / df[total_col].replace(0, np.nan)
-
-    if all(c in df.columns for c in ['police_report_available', 'witnesses', 'property_damage']):
-        df['missing_doc_count'] = (
-            (df['police_report_available'].isin(['NO', 'Unknown', '?'])).astype(int) +
-            (df['witnesses'] == 0).astype(int) +
-            (df['property_damage'].isin(['NO', 'Unknown', '?'])).astype(int)
-        )
-
-    if 'incident_hour_of_the_day' in df.columns:
-        df['is_odd_hour_incident'] = df['incident_hour_of_the_day'].apply(
-            lambda h: 1 if pd.notnull(h) and (h <= 5 or h >= 22) else 0
-        )
-
-    return df
-
-
-def prepare_for_model(df_raw):
-    """Clean, engineer, encode, and align columns to exactly match what the model expects."""
-    df = df_raw.replace('?', np.nan)
-    df_feat = engineer_features(df)
-
-    drop_cols = ['fraud_reported', 'fraud_flag', 'incident_date', 'policy_bind_date',
-                 'incident_location', 'policy_number', 'insured_zip', '_c39']
-    X = df_feat.drop(columns=[c for c in drop_cols if c in df_feat.columns], errors='ignore')
-
-    cat_cols_present = [c for c in categorical_columns if c in X.columns]
-    X_encoded = pd.get_dummies(X, columns=cat_cols_present, drop_first=True)
-
-    # Align to the exact columns the model was trained on:
-    # add any missing dummy columns as 0, drop any extras, keep correct order.
-    X_aligned = X_encoded.reindex(columns=feature_columns, fill_value=0)
-
-    return df_feat, X_aligned
-
-
-# ---------------------------------------------------------------------------
-# LLM explanation (GitHub Models - free tier via GitHub account, no paid API key)
-# Falls back to a clear template-based explanation if no token is configured,
-# so the app still works end-to-end even without the AI step set up.
-# ---------------------------------------------------------------------------
-def generate_ai_explanation(claim_summary: dict, top_factors: list) -> str:
-    # Works both locally (environment variable) and on Streamlit Community Cloud (st.secrets)
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        try:
-            api_key = st.secrets.get("GEMINI_API_KEY", "")
-        except Exception:
-            api_key = ""
-
-    factors_text = "; ".join([f"{f['feature']} (impact: {f['impact']:+.3f})" for f in top_factors])
-
-    prompt = (
-        "You are assisting an insurance investigator. Based ONLY on the structured claim data "
-        "and model output below, write a short (2-3 sentence) plain-English explanation of why "
-        "this claim received its risk score. Do not decide whether it is fraud - only explain the "
-        "signals. Do not invent any facts not given below.\n\n"
-        f"Risk probability: {claim_summary['risk_probability']:.0%}\n"
-        f"Risk category: {claim_summary['risk_category']}\n"
-        f"Most influential factors (feature, SHAP impact): {factors_text}\n"
-        f"Claim amount: {claim_summary.get('total_claim_amount', 'N/A')}\n"
-        f"Incident severity: {claim_summary.get('incident_severity', 'N/A')}\n"
-    )
-
-    if not api_key:
-        # Fallback: deterministic template, no external call. Keeps the app fully functional.
-        factor_names = ", ".join([f['feature'] for f in top_factors[:3]])
-        return (
-            f"This claim was classified as **{claim_summary['risk_category']} risk** "
-            f"({claim_summary['risk_probability']:.0%} probability) primarily due to: {factor_names}. "
-            f"(Set the GEMINI_API_KEY environment variable to enable live AI-generated explanations "
-            f"via Google Gemini — currently showing a rule-based summary.)"
-        )
-
+def get_gemini_api_key() -> str | None:
     try:
-        last_error = None
-        for model_name in ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]:
-            try:
-                resp = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-                    json={"contents": [{"parts": [{"text": prompt}]}]},
-                    timeout=15,
-                )
-                if resp.status_code == 200:
-                    return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                last_error = f"{resp.status_code} for model '{model_name}': {resp.text[:200]}"
-            except Exception as inner_e:
-                last_error = str(inner_e)
-        raise RuntimeError(last_error)
-    except Exception as e:
-        factor_names = ", ".join([f['feature'] for f in top_factors[:3]])
-        return (
-            f"[AI service unavailable, showing rule-based summary — {e}] "
-            f"This claim was classified as {claim_summary['risk_category']} risk "
-            f"({claim_summary['risk_probability']:.0%} probability) primarily due to: {factor_names}."
-        )
+        value = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def risk_category(prob):
-    if prob >= 0.6:
-        return "High"
-    elif prob >= 0.3:
-        return "Medium"
-    return "Low"
+def valid_inference_rows(data: pd.DataFrame) -> pd.DataFrame:
+    frame = data.drop(columns=[TARGET_COLUMN], errors="ignore").copy()
+    bind = pd.to_datetime(frame["policy_bind_date"], errors="coerce")
+    incident = pd.to_datetime(frame["incident_date"], errors="coerce")
+    return frame.loc[incident >= bind].reset_index(drop=True)
 
 
-# ---------------------------------------------------------------------------
-# Sidebar: upload
-# ---------------------------------------------------------------------------
-st.sidebar.header("1. Upload Claims Data")
-uploaded_file = st.sidebar.file_uploader("Upload a claims CSV", type=["csv"])
-
-if uploaded_file is None:
-    st.info("👈 Upload a CSV to get started. You can use `data/insurance_claims.csv` "
-            "(the original dataset) to try the app out.")
-    st.stop()
-
-df_raw = pd.read_csv(uploaded_file)
-
-# ---------------------------------------------------------------------------
-# Data quality section
-# ---------------------------------------------------------------------------
-st.header("📋 Data Quality Overview")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total claims", len(df_raw))
-col2.metric("Columns", df_raw.shape[1])
-missing_pct = (df_raw.replace('?', np.nan).isnull().sum().sum() /
-               (df_raw.shape[0] * df_raw.shape[1]) * 100)
-col3.metric("Missing values", f"{missing_pct:.1f}%")
-col4.metric("Duplicate rows", int(df_raw.duplicated().sum()))
-
-with st.expander("View raw data sample"):
-    st.dataframe(df_raw.head(20))
-
-# ---------------------------------------------------------------------------
-# Score all claims
-# ---------------------------------------------------------------------------
-st.header("🎯 Scoring Claims")
-
-with st.spinner("Scoring claims..."):
-    df_feat, X_aligned = prepare_for_model(df_raw)
-    probs = model.predict_proba(X_aligned)[:, 1]
-    df_feat['risk_probability'] = probs
-    df_feat['risk_category'] = df_feat['risk_probability'].apply(risk_category)
-
-    explainer = shap.TreeExplainer(model)
-    raw_shap = explainer.shap_values(X_aligned)
-    if isinstance(raw_shap, list):
-        shap_vals = raw_shap[1]
-    elif isinstance(raw_shap, np.ndarray) and raw_shap.ndim == 3:
-        shap_vals = raw_shap[:, :, 1]
-    else:
-        shap_vals = raw_shap
-
-st.success(f"Scored {len(df_feat)} claims.")
-
-# ---------------------------------------------------------------------------
-# Model performance (only if ground-truth labels are present in the upload)
-# ---------------------------------------------------------------------------
-if 'fraud_reported' in df_raw.columns:
-    from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
-    y_true = df_raw['fraud_reported'].map({'Y': 1, 'N': 0})
-    y_pred = (df_feat['risk_probability'] >= 0.5).astype(int)
-
-    st.header("📊 Model Performance (ground-truth labels found in upload)")
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Precision", f"{precision_score(y_true, y_pred, zero_division=0):.2f}")
-    p2.metric("Recall", f"{recall_score(y_true, y_pred, zero_division=0):.2f}")
-    p3.metric("F1 Score", f"{f1_score(y_true, y_pred, zero_division=0):.2f}")
-    p4.metric("ROC-AUC", f"{roc_auc_score(y_true, df_feat['risk_probability']):.2f}")
-
-# ---------------------------------------------------------------------------
-# Filter high-risk claims
-# ---------------------------------------------------------------------------
-st.header("🚩 Review Claims")
-risk_filter = st.multiselect(
-    "Filter by risk category", options=["High", "Medium", "Low"], default=["High", "Medium"]
-)
-filtered = df_feat[df_feat['risk_category'].isin(risk_filter)].sort_values(
-    'risk_probability', ascending=False
-)
-
-display_cols = [c for c in ['risk_probability', 'risk_category', 'total_claim_amount',
-                             'incident_severity', 'incident_type'] if c in filtered.columns]
+@st.cache_data(show_spinner="Scoring the verified source claims…")
+def score_source(_bundle, data: pd.DataFrame) -> pd.DataFrame:
+    return predict_claims(_bundle, valid_inference_rows(data))
 
 
-def _style_risk(val):
-    colors = {"High": "#C13B44", "Medium": "#B7791F", "Low": "#1E8A57"}
-    return f"color: {colors.get(val, '#1B2A4A')}; font-weight: 700;"
+@st.cache_data(show_spinner="Preparing feature explanations…")
+def explain_source(_bundle, data: pd.DataFrame) -> dict:
+    return explain_claims(_bundle, valid_inference_rows(data))
 
 
-styled_table = filtered[display_cols].style.format({'risk_probability': '{:.1%}'})
-if 'risk_category' in display_cols:
-    styled_table = styled_table.map(_style_risk, subset=['risk_category'])
+def page_header(eyebrow: str, title: str, subtitle: str) -> None:
+    st.markdown(f'<div class="eyebrow">{eyebrow}</div>', unsafe_allow_html=True)
+    st.title(title)
+    st.markdown(f'<div class="page-subtitle">{subtitle}</div>', unsafe_allow_html=True)
 
-st.dataframe(styled_table, use_container_width=True)
 
-# ---------------------------------------------------------------------------
-# Individual claim explanation
-# ---------------------------------------------------------------------------
-st.header("🔬 Inspect an Individual Claim")
+def risk_badge(category: str) -> None:
+    css = {"High": "risk-high", "Medium": "risk-medium", "Low": "risk-low"}.get(category, "risk-low")
+    st.markdown(f'<span class="risk-badge {css}">{category} risk</span>', unsafe_allow_html=True)
 
-if len(filtered) == 0:
-    st.warning("No claims match the current filter.")
-else:
-    selected_idx = st.selectbox(
-        "Select a claim (shown by row number)",
-        options=filtered.index.tolist(),
-        format_func=lambda i: f"Row {i} — {df_feat.loc[i, 'risk_category']} risk "
-                               f"({df_feat.loc[i, 'risk_probability']:.0%})"
+
+def chart_layout(fig: go.Figure, height: int = 330) -> go.Figure:
+    fig.update_layout(
+        height=height,
+        margin=dict(l=18, r=18, t=48, b=18),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        font=dict(family="Inter, Arial, sans-serif", color="#132238", size=12),
+        title_font=dict(color="#132238", size=16),
+        legend=dict(font=dict(color="#132238")),
+        hoverlabel=dict(bgcolor="#132238", font_color="#ffffff"),
     )
+    fig.update_xaxes(showgrid=False, linecolor="#d9e2ee", tickfont=dict(color="#53657d"), title_font=dict(color="#53657d"))
+    fig.update_yaxes(gridcolor="#e6edf5", zeroline=False, tickfont=dict(color="#53657d"), title_font=dict(color="#53657d"))
+    return fig
 
-    row = df_feat.loc[selected_idx]
-    position_in_full = df_feat.index.get_loc(selected_idx)
 
+def render_gemini_summary(probability: float, category: str, threshold: float, local: dict) -> None:
+    result: GeminiResult = generate_investigator_summary(
+        api_key=get_gemini_api_key(),
+        probability=probability,
+        risk_category=category,
+        threshold=threshold,
+        positive=local["positive"],
+        negative=local["negative"],
+    )
+    if result.used_gemini:
+        st.markdown('<div class="section-kicker">AI-assisted review note</div>', unsafe_allow_html=True)
+        st.container(border=True).write(result.text)
+        st.caption("Generated from the saved model probability and verified SHAP contributions; not proof of fraud.")
+        return
+    messages = {
+        "missing_key": "Gemini is not configured. The verified rule-based explanation remains active.",
+        "sdk_missing": "The Google GenAI SDK is unavailable. The verified rule-based explanation remains active.",
+        "quota_exceeded": "Gemini quota or rate limit reached. The verified rule-based explanation is shown instead.",
+        "network_error": "Gemini could not be reached. The verified rule-based explanation is shown instead.",
+        "empty_response": "Gemini returned no summary. The verified rule-based explanation is shown instead.",
+        "api_error": "Gemini returned an error. The verified rule-based explanation is shown instead.",
+    }
+    st.info(messages.get(result.status, messages["api_error"]), icon=":material/info:")
+
+
+def dashboard_page(bundle: dict, data: pd.DataFrame) -> None:
+    page_header("Claim intelligence / dashboard", "Insurance claim risk overview", "A high-contrast command centre for investigation prioritisation using the frozen v2 model.")
+    scored = score_source(bundle, data)
+    counts = scored["risk_category"].value_counts().reindex(["High", "Medium", "Low"], fill_value=0)
+    avg_probability = float(scored["fraud_probability"].mean()) if len(scored) else 0.0
+    with st.container(horizontal=True):
+        st.metric("Total claims", f"{len(scored):,}", help="Valid claims available for inference; one invalid source date row is excluded from scoring.")
+        st.metric("High-risk claims", f"{int(counts['High']):,}")
+        st.metric("Medium-risk claims", f"{int(counts['Medium']):,}")
+        st.metric("Low-risk claims", f"{int(counts['Low']):,}")
+        st.metric("Average fraud probability", f"{avg_probability:.1%}")
+    st.caption(f"Model status: HistGradientBoosting + isotonic calibration · threshold {bundle['threshold']:.2f} · source dataset: {len(data):,} rows")
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        risk_frame = pd.DataFrame({"Risk category": counts.index, "Claims": counts.values})
+        fig = px.bar(risk_frame, x="Risk category", y="Claims", color="Risk category", color_discrete_map={"High": "#c83b4b", "Medium": "#d69122", "Low": "#17834b"}, title="Fraud risk distribution", text_auto=True)
+        st.plotly_chart(chart_layout(fig), width="stretch", config={"displayModeBar": False})
+    with right:
+        fig = px.histogram(scored, x="fraud_probability", nbins=24, color_discrete_sequence=["#2368d1"], title="Prediction probability distribution")
+        fig.update_xaxes(title="Estimated fraud probability", tickformat=".0%")
+        st.plotly_chart(chart_layout(fig), width="stretch", config={"displayModeBar": False})
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        amounts = valid_inference_rows(data).copy()
+        amounts["total_claim_amount"] = pd.to_numeric(amounts["total_claim_amount"], errors="coerce")
+        fig = px.histogram(amounts, x="total_claim_amount", nbins=28, color_discrete_sequence=["#5b8def"], title="Claim amount distribution")
+        fig.update_xaxes(title="Total claim amount")
+        st.plotly_chart(chart_layout(fig), width="stretch", config={"displayModeBar": False})
+    with right:
+        explanation = explain_source(bundle, data)
+        top = explanation["global_importance"].head(10).sort_values("mean_abs_shap")
+        fig = px.bar(top, x="mean_abs_shap", y="feature", orientation="h", color_discrete_sequence=["#2368d1"], title="Top model-associated risk factors")
+        fig.update_xaxes(title="Mean absolute SHAP value")
+        fig.update_yaxes(title="")
+        st.plotly_chart(chart_layout(fig, 370), width="stretch", config={"displayModeBar": False})
+
+    valid = valid_inference_rows(data)
+    if "incident_date" in valid.columns:
+        trend = valid.assign(incident_month=pd.to_datetime(valid["incident_date"], errors="coerce").dt.to_period("M").astype(str))
+        trend["fraud_probability"] = scored["fraud_probability"].to_numpy()
+        trend = trend.groupby("incident_month", as_index=False).agg(claims=("fraud_probability", "size"), average_risk=("fraud_probability", "mean"))
+        fig = go.Figure(go.Scatter(x=trend["incident_month"], y=trend["average_risk"], mode="lines+markers", line=dict(color="#2368d1", width=3), marker=dict(size=7)))
+        fig.update_layout(title="Average predicted risk by incident month", xaxis_title="Incident month", yaxis_title="Average fraud probability")
+        fig.update_yaxes(tickformat=".0%")
+        st.plotly_chart(chart_layout(fig), width="stretch", config={"displayModeBar": False})
+
+
+def upload_page() -> None:
+    page_header("Workspace / data intake", "Upload claims", "Inspect a CSV before scoring it. Upload validation never changes the preserved source dataset.")
+    uploaded = st.file_uploader("Drop a claims CSV here", type=["csv"], key="preview_upload", help="The target column is optional for data-quality inspection.")
+    if uploaded is None:
+        st.markdown('<div class="muted-card">Choose a CSV to see its filename, shape, missing values, duplicate count, validation findings, and a preview.</div>', unsafe_allow_html=True)
+        return
+    try:
+        frame = pd.read_csv(uploaded)
+    except Exception:
+        st.error("The file could not be read as a CSV.", icon=":material/error:")
+        return
+    report = validate_claims(frame, require_target=TARGET_COLUMN in frame.columns)
+    st.success(f"Loaded {uploaded.name}", icon=":material/check_circle:")
+    with st.container(horizontal=True):
+        st.metric("Records", f"{len(frame):,}")
+        st.metric("Columns", f"{len(frame.columns):,}")
+        st.metric("Missing cells", f"{int(frame.replace('?', pd.NA).isna().sum().sum()):,}")
+        st.metric("Duplicate rows", f"{report.duplicate_rows:,}")
+    if report.errors:
+        st.error("Validation requires attention: " + "; ".join(report.errors), icon=":material/error:")
+    else:
+        st.success("Schema checks passed for this upload.", icon=":material/verified:")
+    if report.warnings:
+        st.warning("; ".join(report.warnings), icon=":material/warning:")
+    st.markdown('<div class="section-kicker">Data preview</div>', unsafe_allow_html=True)
+    st.dataframe(frame.head(12), hide_index=True, width="stretch", height=360, alt="Uploaded claims preview")
+
+
+def prediction_form(bundle: dict, data: pd.DataFrame) -> None:
+    page_header("Workspace / assessment", "Fraud prediction", "Assess one claim with the frozen production pipeline and inspect the verified reasons behind its score.")
+    st.warning("A high-risk result is an indicator for investigation, not proof that fraud occurred.", icon=":material/warning:")
+    sample_frame = data.copy()
+    bind = pd.to_datetime(sample_frame["policy_bind_date"], errors="coerce")
+    incident = pd.to_datetime(sample_frame["incident_date"], errors="coerce")
+    sample = sample_frame.loc[incident >= bind].iloc[0]
+    categorical = {"policy_state", "policy_csl", "insured_sex", "insured_education_level", "insured_occupation", "insured_hobbies", "insured_relationship", "incident_type", "collision_type", "incident_severity", "authorities_contacted", "incident_state", "incident_city", "property_damage", "police_report_available", "auto_make", "auto_model"}
+    form_values = {}
+    with st.form("claim_form"):
+        st.markdown('<div class="section-kicker">Claim details</div>', unsafe_allow_html=True)
+        for start in range(0, len(RAW_COLUMNS[:-1]), 4):
+            cols = st.columns(4)
+            for col, field in zip(cols, RAW_COLUMNS[:-1][start:start + 4]):
+                value = sample[field]
+                if field in ("policy_bind_date", "incident_date"):
+                    form_values[field] = col.text_input(field.replace("_", " ").title(), str(value), help="Use YYYY-MM-DD")
+                elif field in ("policy_number", "insured_zip", "incident_location"):
+                    form_values[field] = col.text_input(field.replace("_", " ").title(), str(value))
+                elif field in categorical:
+                    options = sorted(set(data[field].dropna().astype(str)) | {"Unknown"})
+                    current = str(value) if str(value) in options else options[0]
+                    form_values[field] = col.selectbox(field.replace("_", " ").title(), options, index=options.index(current))
+                else:
+                    form_values[field] = col.number_input(field.replace("_", " ").title(), value=float(value), step=1.0)
+        submitted = st.form_submit_button("Assess claim", width="stretch", icon=":material/analytics:")
+    if not submitted:
+        return
+    claim = pd.DataFrame([form_values])
+    report = validate_claims(claim, require_target=False)
+    if report.errors:
+        st.error("Input validation failed: " + "; ".join(report.errors), icon=":material/error:")
+        return
+    scored = predict_claims(bundle, claim)
+    probability = float(scored.iloc[0]["fraud_probability"])
+    category = str(scored.iloc[0]["risk_category"])
+    st.markdown('<div class="section-kicker">Assessment result</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1.2, 1, 1], gap="large")
+    with c1:
+        st.metric("Estimated fraud probability", f"{probability:.1%}")
+        risk_badge(category)
+    with c2:
+        st.metric("Total claim amount", f"{float(claim['total_claim_amount'].iloc[0]):,.0f}")
+    with c3:
+        st.metric("Decision threshold", f"{bundle['threshold']:.2f}")
+    fig = go.Figure(go.Indicator(mode="gauge+number", value=probability * 100, number={"suffix": "%"}, gauge={"axis": {"range": [0, 100]}, "bar": {"color": "#c83b4b" if category == "High" else "#17834b"}, "steps": [{"range": [0, bundle["threshold"] * 100], "color": "#ddf7e9"}, {"range": [bundle["threshold"] * 100, 100], "color": "#ffe7ea"}]}, title={"text": "Risk score"}))
+    st.plotly_chart(chart_layout(fig, 280), width="stretch", config={"displayModeBar": False})
+    explanation = explain_claims(bundle, claim)
+    local = explanation["local"][0]
+    st.markdown('<div class="section-kicker">Why this score?</div>', unsafe_allow_html=True)
+    st.write(plain_language_explanation(probability, local, bundle["threshold"]))
+    with st.container(border=True):
+        st.dataframe(pd.DataFrame(local["positive"] + local["negative"]), hide_index=True, width="stretch", alt="Verified local SHAP contributions")
+    render_gemini_summary(probability, category, bundle["threshold"], local)
+
+
+def bulk_page(bundle: dict) -> None:
+    page_header("Workspace / operations", "Bulk analysis", "Score a validated claims file, filter risk categories, and download an investigation queue.")
+    uploaded = st.file_uploader("Upload claims for batch screening", type=["csv"], key="bulk_upload")
+    if uploaded is None:
+        st.markdown('<div class="muted-card">The upload must contain the original claim fields and must not include fabricated values. The target column is ignored for prediction.</div>', unsafe_allow_html=True)
+        return
+    try:
+        frame = pd.read_csv(uploaded)
+    except Exception:
+        st.error("The file could not be read as a CSV.", icon=":material/error:")
+        return
+    report = validate_claims(frame, require_target=False)
+    if report.errors:
+        st.error("The upload was rejected: " + "; ".join(report.errors), icon=":material/error:")
+        return
+    scored = predict_claims(bundle, frame.drop(columns=[TARGET_COLUMN], errors="ignore"))
+    counts = scored["risk_category"].value_counts().reindex(["High", "Medium", "Low"], fill_value=0)
+    with st.container(horizontal=True):
+        st.metric("Processed claims", f"{len(scored):,}")
+        st.metric("High risk", f"{int(counts['High']):,}")
+        st.metric("Medium risk", f"{int(counts['Medium']):,}")
+        st.metric("Low risk", f"{int(counts['Low']):,}")
+    search, category, sort_order = st.columns([2, 1, 1])
+    query = search.text_input("Search records", placeholder="Policy number or location", key="bulk_query")
+    category_filter = category.selectbox("Risk category", ["All", "High", "Medium", "Low"], key="bulk_category")
+    descending = sort_order.toggle("Highest risk first", value=True, key="bulk_sort")
+    view = scored.copy()
+    if category_filter != "All":
+        view = view.loc[view["risk_category"] == category_filter]
+    if query:
+        mask = view.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)
+        view = view.loc[mask]
+    view = view.sort_values("fraud_probability", ascending=not descending)
+    st.caption(f"Showing {len(view):,} of {len(scored):,} processed claims")
+    st.dataframe(view, hide_index=True, width="stretch", height=440, column_config={"fraud_probability": st.column_config.ProgressColumn("Fraud probability", min_value=0, max_value=1, format="%.1f%%"), "risk_category": st.column_config.TextColumn("Risk category")}, alt="Bulk claim risk predictions")
+    st.download_button("Download scored report", scored.to_csv(index=False), "claim_risk_scored.csv", "text/csv", width="content", icon=":material/download:")
+
+
+def explainability_page(bundle: dict, data: pd.DataFrame) -> None:
+    page_header("Workspace / transparency", "Explainable AI", "Inspect global model associations and the local evidence behind an individual risk estimate.")
+    valid = valid_inference_rows(data)
+    explanation = explain_source(bundle, data)
+    st.info("SHAP contributions describe model associations on transformed features. They are not causal explanations or proof of fraud.", icon=":material/lightbulb:")
+    top = explanation["global_importance"].head(15).sort_values("mean_abs_shap")
+    fig = px.bar(top, x="mean_abs_shap", y="feature", orientation="h", color_discrete_sequence=["#2368d1"], title="Global feature importance")
+    fig.update_xaxes(title="Mean absolute SHAP value")
+    fig.update_yaxes(title="")
+    st.plotly_chart(chart_layout(fig, 450), width="stretch", config={"displayModeBar": False})
+    selected = st.number_input("Claim row to explain", min_value=0, max_value=max(0, len(valid) - 1), value=0, step=1, key="explanation_row")
+    local = explanation["local"][int(selected)]
+    probability = float(bundle["model"].predict_proba(valid.iloc[[int(selected)]])[0, 1])
+    category = risk_category(probability, bundle["threshold"])
     c1, c2 = st.columns([1, 2])
     with c1:
-        st.metric("Fraud Risk Probability", f"{row['risk_probability']:.1%}")
-        st.markdown(
-            f'<div style="margin: -0.3rem 0 1.1rem 0;">{risk_badge_html(row["risk_category"])}</div>',
-            unsafe_allow_html=True
-        )
-        if 'total_claim_amount' in row:
-            st.metric("Claim Amount", f"${row['total_claim_amount']:,.0f}")
-
+        st.metric("Estimated fraud probability", f"{probability:.1%}")
+        risk_badge(category)
     with c2:
-        st.subheader("Most influential factors")
-        claim_shap = shap_vals[position_in_full]
-        contrib = pd.DataFrame({
-            'feature': X_aligned.columns,
-            'impact': claim_shap
-        }).sort_values('impact', key=abs, ascending=False).head(6)
+        st.write(plain_language_explanation(probability, local, bundle["threshold"]))
+    st.dataframe(pd.DataFrame(local["positive"] + local["negative"]), hide_index=True, width="stretch", alt="Individual SHAP contributions")
+    if st.button("Generate Gemini investigator summary", key="gemini_explainability_summary", width="content", icon=":material/auto_awesome:"):
+        render_gemini_summary(probability, category, bundle["threshold"], local)
 
-        fig, ax = plt.subplots(figsize=(6, 3))
-        colors = ['#C44E52' if v > 0 else '#4C72B0' for v in contrib['impact']]
-        ax.barh(contrib['feature'], contrib['impact'], color=colors)
-        ax.set_xlabel("Impact on risk score (red = increases risk)")
-        ax.invert_yaxis()
-        st.pyplot(fig)
 
-    st.subheader("🤖 AI-generated investigator summary")
-    top_factors = contrib.to_dict('records')
-    claim_summary = {
-        'risk_probability': row['risk_probability'],
-        'risk_category': row['risk_category'],
-        'total_claim_amount': row.get('total_claim_amount', 'N/A'),
-        'incident_severity': row.get('incident_severity', 'N/A'),
-    }
-    with st.spinner("Generating explanation..."):
-        explanation = generate_ai_explanation(claim_summary, top_factors)
-    st.info(explanation)
-    st.caption("⚠️ This explanation is AI-generated from model output only. "
-               "It is NOT a fraud determination — a human investigator makes that call.")
+def performance_page(bundle: dict) -> None:
+    page_header("Workspace / validation", "Model performance", "Verified held-out metrics for the versioned HistGradientBoosting pipeline.")
+    st.warning("These results come from one small held-out split and are not external validation of real-world fraud detection effectiveness.", icon=":material/warning:")
+    metrics = bundle["metrics"]
+    cols = st.columns(4)
+    for col, label, key in zip(cols, ["Accuracy", "Precision", "Recall", "F1 score"], ["accuracy", "precision", "recall", "f1"]):
+        col.metric(label, f"{metrics[key]:.1%}")
+    st.markdown('<div class="section-kicker">Ranking and calibration</div>', unsafe_allow_html=True)
+    cols = st.columns(4)
+    for col, label, key in zip(cols, ["ROC-AUC", "PR-AUC", "Brier score", "Specificity"], ["roc_auc", "pr_auc", "brier_score", "specificity"]):
+        col.metric(label, f"{metrics[key]:.3f}")
+    cm = metrics["confusion_matrix"]
+    fig = px.imshow(cm, text_auto=True, x=["Predicted non-fraud", "Predicted fraud"], y=["Actual non-fraud", "Actual fraud"], color_continuous_scale=[[0, "#e8f0ff"], [1, "#2368d1"]], title="Held-out confusion matrix")
+    fig.update_xaxes(side="top")
+    st.plotly_chart(chart_layout(fig, 390), width="stretch", config={"displayModeBar": False})
+    for filename, caption in [("roc_curve.png", "ROC curve"), ("precision_recall_curve.png", "Precision-recall curve"), ("calibration_curve.png", "Calibration curve")]:
+        path = REPORTS / filename
+        if path.exists():
+            st.image(str(path), caption=caption, alt=caption)
 
-# ---------------------------------------------------------------------------
-# Download scored results
-# ---------------------------------------------------------------------------
-st.header("⬇️ Download Results")
-output_cols = [c for c in df_raw.columns if c in df_feat.columns] + ['risk_probability', 'risk_category']
-csv_buffer = io.StringIO()
-df_feat[output_cols].to_csv(csv_buffer, index=False)
-st.download_button(
-    "Download scored claims as CSV",
-    data=csv_buffer.getvalue(),
-    file_name="scored_claims.csv",
-    mime="text/csv"
-)
+
+def about_page(bundle: dict, data: pd.DataFrame) -> None:
+    page_header("Workspace / project", "About this project", "A transparent academic prototype for explainable claim investigation prioritisation.")
+    left, right = st.columns([1.2, 1], gap="large")
+    with left:
+        st.markdown("### Research scope")
+        st.write("The project combines leakage-safe preprocessing, domain feature engineering, calibrated classification, and SHAP explanations for structured insurance claims.")
+        st.markdown("### Guardrails")
+        st.write("A prediction is a risk estimate, not proof of fraud. Human review is required. SHAP values are associative, not causal. The dataset is small and has no external or temporal validation.")
+    with right:
+        with st.container(border=True):
+            st.markdown("### Production status")
+            st.write(f"**Artifact:** `{ARTIFACT.name}`")
+            st.write(f"**Model:** {bundle['selected_model_name']}")
+            st.write(f"**Calibration:** {bundle['calibration_method']}")
+            st.write(f"**Threshold:** {bundle['threshold']:.2f}")
+            st.write(f"**Source rows:** {len(data):,}")
+            st.markdown('<span class="status-pill">Inference ready</span>', unsafe_allow_html=True)
+
+
+inject_styles()
+
+try:
+    bundle = get_bundle()
+    dataset = get_dataset()
+except Exception as exc:
+    st.error(f"Dashboard could not load its versioned artifact: {exc}", icon=":material/error:")
+    st.stop()
+
+nav_options = ["Dashboard", "Upload claims", "Claim risk prediction", "Batch screening", "Explainability", "Model performance", "About project"]
+nav_labels = {"Claim risk prediction": "Fraud prediction", "Batch screening": "Bulk analysis", "Explainability": "Explainable AI"}
+with st.sidebar:
+    st.markdown('<div class="brand-mark"><div class="brand-icon">CI</div><div><div class="brand-name">Claim intelligence</div><div class="brand-subtitle">Fraud risk workspace</div></div></div>', unsafe_allow_html=True)
+    st.markdown("<hr>", unsafe_allow_html=True)
+    selection = st.segmented_control("Workspace", nav_options, default="Dashboard", format_func=lambda item: nav_labels.get(item, item), key="dashboard_section", width="stretch", wrap=True)
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("<span class='status-pill'>Model online</span>", unsafe_allow_html=True)
+    st.caption("v2 production bundle")
+    st.caption("Risk threshold 0.18")
+
+st.markdown('<div class="hero"><div class="eyebrow">Insurance claim fraud intelligence</div><h1>Decision support for claim investigators</h1><p>Prioritise review with a calibrated risk score, transparent feature contributions, and a workflow designed for careful human judgement.</p></div>', unsafe_allow_html=True)
+
+if selection == "Dashboard":
+    dashboard_page(bundle, dataset)
+elif selection == "Upload claims":
+    upload_page()
+elif selection == "Claim risk prediction":
+    prediction_form(bundle, dataset)
+elif selection == "Batch screening":
+    bulk_page(bundle)
+elif selection == "Explainability":
+    explainability_page(bundle, dataset)
+elif selection == "Model performance":
+    performance_page(bundle)
+else:
+    about_page(bundle, dataset)

@@ -1,0 +1,50 @@
+{
+  "probability": 0.7376676169359097,
+  "risk_category": "High",
+  "positive_contributions": [
+    {
+      "feature": "incident_severity_Major Damage",
+      "shap_value": 3.100954062476331
+    },
+    {
+      "feature": "months_as_customer",
+      "shap_value": 0.5943617872155748
+    },
+    {
+      "feature": "policy_annual_premium",
+      "shap_value": 0.4933978604089786
+    },
+    {
+      "feature": "injury_claim_ratio",
+      "shap_value": 0.4860816075630827
+    },
+    {
+      "feature": "auto_year",
+      "shap_value": 0.4218250660405286
+    }
+  ],
+  "negative_contributions": [
+    {
+      "feature": "property_claim",
+      "shap_value": -0.31109749261829495
+    },
+    {
+      "feature": "capital-loss",
+      "shap_value": -0.22071248570557728
+    },
+    {
+      "feature": "insured_hobbies_chess",
+      "shap_value": -0.1656108460324544
+    },
+    {
+      "feature": "police_report_available_NO",
+      "shap_value": -0.1404225584391479
+    },
+    {
+      "feature": "claim_amount_to_annual_premium",
+      "shap_value": -0.1367787708252531
+    }
+  ],
+  "plain_language": "The model assigned 73.8% estimated fraud risk (High). The strongest factors increasing the score were incident_severity_Major Damage, months_as_customer, policy_annual_premium; factors lowering it included property_claim, capital-loss, insured_hobbies_chess. This is a model-based risk assessment for investigation prioritisation, not proof that fraud occurred.",
+  "note": "SHAP contributions describe model associations, not causal effects or proof of fraud."
+}

@@ -1,0 +1,21 @@
+{
+  "validation": {
+    "valid": false,
+    "errors": [
+      "incident_date occurs before policy_bind_date"
+    ],
+    "warnings": [],
+    "missing_columns": [],
+    "unexpected_columns": [],
+    "missing_value_tokens": {
+      "collision_type": 178,
+      "property_damage": 360,
+      "police_report_available": 343
+    },
+    "duplicate_rows": 0,
+    "row_count": 1000,
+    "column_count": 39
+  },
+  "selected_model": "hist_gradient_boosting",
+  "calibration_method": "isotonic"
+}
