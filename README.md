@@ -1,137 +1,350 @@
-# 🔍 Insurance Claim Risk Detection
+# Insurance Claim Fraud Risk Detection Using Explainable Machine Learning
 
-**AI-powered fraud risk scoring for auto-insurance claims.**
+An explainable, leakage-controlled machine-learning research prototype for prioritising insurance claims for human investigation. It produces a fraud-risk estimate and feature-level explanation; it does not determine that fraud occurred.
 
-**🚀 [Live App](https://insurance-claim-risk-ap7ujahjub93vknofkwmsh.streamlit.app/) &nbsp;·&nbsp; 📦 [This Repo](https://github.com/deedpak/insurance-claim-risk)**
+This repository contains the final-year M.Tech project of **Ms. S. Shaheen**, Annamacharya Institute of Technology and Sciences, Tirupati, Andhra Pradesh, India.
 
----
+## Table of contents
 
-## What it does
+- [Project overview](#project-overview)
+- [Problem statement](#problem-statement)
+- [Objectives](#objectives)
+- [Technologies](#technologies)
+- [Dataset](#dataset)
+- [Methodology](#methodology)
+- [Data validation and preprocessing](#data-validation-and-preprocessing)
+- [Feature engineering](#feature-engineering)
+- [Models and selection methodology](#models-and-selection-methodology)
+- [Verified evaluation results](#verified-evaluation-results)
+- [Explainable AI](#explainable-ai)
+- [System architecture](#system-architecture)
+- [Streamlit dashboard](#streamlit-dashboard)
+- [Repository structure](#repository-structure)
+- [Installation on Windows](#installation-on-windows)
+- [Running the project](#running-the-project)
+- [Testing](#testing)
+- [Security and data handling](#security-and-data-handling)
+- [Limitations](#limitations)
+- [Future enhancements](#future-enhancements)
+- [Responsible AI](#responsible-ai)
+- [Author](#author)
 
-An insurer processes thousands of claims manually. This prototype flags the ones investigators should look at first — and explains *why* — in four steps:
+## Project overview
 
-| | |
-|---|---|
-| 🧹 **Clean & understand** | 1,000 real auto-insurance claims, 39 fields — missing values, duplicates, and data leakage handled and documented |
-| 📊 **Explore & engineer** | 7 visual analyses answering the key fraud questions, plus 9 engineered features |
-| 🤖 **Model & explain** | Baseline → Logistic Regression → Random Forest, compared honestly with imbalance-aware metrics, explained per-claim with SHAP |
-| 💬 **Summarise with AI** | Google Gemini turns each claim's model output into a plain-English note for a human investigator — it never decides fraud itself |
+Insurance claim fraud screening is a binary classification problem with an operational trade-off: missing a potentially fraudulent claim may be costly, while incorrectly flagging a genuine claim consumes investigation capacity. This project evaluates that trade-off using fraud-sensitive metrics, validation-only threshold selection, calibration experiments, and SHAP-based explanations.
 
-Everything is wrapped in an interactive **Streamlit** app: upload a CSV, see data quality and model performance, filter to high-risk claims, drill into any individual claim's SHAP breakdown and AI summary, and download the scored results.
+The current production bundle is `models/claim_risk_pipeline_v2.joblib`. The Streamlit application loads this saved bundle at startup and does not train or retrain a model when the dashboard is opened.
 
-## Screenshots
+## Problem statement
 
-| Data quality & scoring | Individual claim explanation |
-|---|---|
-| *Upload a CSV to see missing values, duplicates, and live fraud scoring* | *SHAP factors + AI-generated investigator summary per claim* |
+Given structured insurance claim information available at assessment time, estimate the likelihood that `fraud_reported` is `Y` and present the result in a form that supports human review. The prediction is a risk-ranking aid, not a fraud finding, denial decision, or legal conclusion.
 
-*(Add your own screenshots here — drag them into this README on GitHub, or reference an `assets/` folder.)*
+## Objectives
 
-## Live demo
+- Validate the raw claim schema and surface data-quality issues.
+- Preserve the original raw dataset and avoid target leakage.
+- Build one reusable preprocessing path for training and inference.
+- Engineer domain-relevant claim, policy-duration, ratio, and missing-document features.
+- Compare classical and tree-based classifiers under stratified validation.
+- Select an operating threshold using training-side validation data only.
+- Calibrate and explain the selected model with SHAP.
+- Provide single-claim and batch screening through Streamlit.
+- Audit uncertainty, stability, feature robustness, and project limitations.
 
-No setup needed — try it directly:
-**[insurance-claim-risk-ap7ujahjub93vknofkwmsh.streamlit.app](https://insurance-claim-risk-ap7ujahjub93vknofkwmsh.streamlit.app/)**
+## Technologies
 
-Upload `data/insurance_claims.csv` (included in this repo) to see it in action.
+- Python 3.14.7 in the audited development environment
+- pandas and NumPy for data handling
+- scikit-learn for validation, preprocessing, models, calibration, and metrics
+- imbalanced-learn for the fold-local SMOTE experiment
+- XGBoost for the optional experimental comparison
+- SHAP for global and local model explanations
+- Streamlit for the dashboard
+- joblib for versioned model serialization
+- pytest for automated tests
 
-## Project structure
+The exact dependency declarations are in [requirements.txt](requirements.txt). CatBoost and LightGBM were not installed in the audited environment and are not part of the verified results.
 
+## Dataset
+
+The preserved source file is [data/insurance_claims.csv](data/insurance_claims.csv).
+
+| Property | Value |
+|---|---:|
+| Records | 1,000 |
+| Original columns | 39 |
+| Target | `fraud_reported` |
+| Non-fraud (`N`) | 753 |
+| Fraud (`Y`) | 247 |
+| Held-out test records | 200 |
+| Fraud records in held-out test set | 49 |
+
+The CSV is included as a local project input. Its external provenance and licence were not verified during this audit; confirm redistribution rights before publishing the data or deploying the project.
+
+## Methodology
+
+The verified training protocol uses:
+
+1. Raw CSV loading and schema validation.
+2. Separation of `fraud_reported` from model inputs.
+3. Stratified 80/20 train/test split with `random_state=42`.
+4. Stratified five-fold cross-validation on the training partition.
+5. Fit-aware feature engineering and `ColumnTransformer` preprocessing inside the estimator pipeline.
+6. Training-side validation for calibration and threshold selection.
+7. One final evaluation on the untouched held-out test partition.
+
+The production model is a `HistGradientBoostingClassifier` with isotonic calibration and a frozen threshold of `0.18`.
+
+## Data validation and preprocessing
+
+The validation implementation is in [src/data_validation.py](src/data_validation.py). It checks required columns, target values, duplicate rows, date parsing, date ordering, numeric ranges, claim-component reconciliation, unexpected columns, and literal missing-value tokens.
+
+The three source columns containing `?` tokens are:
+
+- `collision_type` — 178 tokens
+- `property_damage` — 360 tokens
+- `police_report_available` — 343 tokens
+
+The shared preprocessing implementation is in [src/preprocessing.py](src/preprocessing.py). It uses a scikit-learn `Pipeline` and `ColumnTransformer` with numerical imputation/scaling and categorical imputation plus unknown-safe one-hot encoding. The same fitted pipeline is used during training, dashboard inference, and batch scoring.
+
+The audit identified one source record where `incident_date` precedes `policy_bind_date`. This is reported by validation and is not silently rewritten. The sentinel `umbrella_limit=-1000000` is handled as a missing/sentinel value by the feature-processing policy.
+
+## Feature engineering
+
+Fit-aware transformations are implemented in [src/feature_engineering.py](src/feature_engineering.py). The engineered features include:
+
+- `policy_age_days`: incident date minus policy binding date.
+- `customer_tenure_years`: `months_as_customer / 12`.
+- `claim_amount_per_tenure_year`: total claim amount divided by customer tenure.
+- `is_high_value_claim`: total claim amount at or above the training-fold 90th percentile.
+- `vehicle_claim_ratio`, `injury_claim_ratio`, and `property_claim_ratio`: each component divided by total claim amount.
+- `missing_doc_count`: count of missing document-related fields.
+- `is_odd_hour_incident`: indicator for an incident hour outside the ordinary daytime range.
+- `vehicle_age_at_incident`: incident year minus vehicle year.
+- `claim_amount_to_annual_premium`: total claim amount divided by annual premium.
+- `claim_component_gap`: total claim amount minus the sum of claim components.
+
+The complete formulas, rationale, exclusions, and leakage discussion are in [docs/FEATURE_ENGINEERING.md](docs/FEATURE_ENGINEERING.md).
+
+## Models and selection methodology
+
+The primary training implementation is in [src/modeling.py](src/modeling.py). Candidate families include Logistic Regression, Decision Tree, Random Forest, Extra Trees, HistGradientBoosting, and a fold-local Logistic Regression plus SMOTE experiment. Checkpoint F additionally evaluated tuned HistGradientBoosting and XGBoost.
+
+The production choice was not based on accuracy alone. Selection considered cross-validation PR-AUC, stability, recall, precision, F1, ROC-AUC, calibration, interpretability, and the fraud-screening threshold trade-off. The saved production artifact remains calibrated HGB even though an experimental XGBoost run had higher accuracy on this one held-out split.
+
+## Verified evaluation results
+
+The production values below match [reports/checkpoint_c_v2/final_test_metrics.json](reports/checkpoint_c_v2/final_test_metrics.json) and the recalculation in [reports/checkpoint_g/recalculated_production_metrics.json](reports/checkpoint_g/recalculated_production_metrics.json).
+
+### Production held-out results
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 81.50% |
+| Precision | 58.33% |
+| Recall | 85.71% |
+| F1-score | 69.42% |
+| ROC-AUC | 0.835 |
+| PR-AUC / Average Precision | 0.535 |
+| Brier score | 0.123 |
+| Specificity | 80.13% |
+| Frozen threshold | 0.18 |
+
+### Production confusion matrix
+
+|  | Predicted non-fraud | Predicted fraud |
+|---|---:|---:|
+| Actual non-fraud | 121 | 30 |
+| Actual fraud | 7 | 42 |
+
+At this threshold, the model catches 42 of 49 fraud claims in the held-out partition but produces 30 false positives. That trade-off is appropriate for investigation prioritisation only if review capacity and the cost of missed fraud justify it.
+
+### Cross-validation stability
+
+The base HGB five-fold training-partition PR-AUC values were `0.658, 0.743, 0.716, 0.670, 0.570`, with mean ± standard deviation `0.671 ± 0.059`.
+
+### Verified Checkpoint F comparison
+
+These values are recorded in [reports/checkpoint_f/experiment_comparison.csv](reports/checkpoint_f/experiment_comparison.csv). Experimental held-out metrics use thresholds selected from training-side validation for each candidate; they are not replacements for the calibrated production result above.
+
+| Model | CV PR-AUC ± SD | Test accuracy | Test precision | Test recall | Test F1 | Test ROC-AUC | Test PR-AUC |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Tuned HGB | 0.704 ± 0.049 | 82.50% | 60.29% | 83.67% | 70.09% | 0.824 | 0.536 |
+| Default HGB | 0.671 ± 0.059 | 82.00% | 59.42% | 83.67% | 69.49% | 0.847 | 0.558 |
+| Balanced Logistic Regression | 0.667 ± 0.063 | 83.50% | 64.81% | 71.43% | 67.96% | 0.830 | 0.532 |
+| XGBoost | 0.647 ± 0.067 | 84.50% | 63.64% | 85.71% | 73.04% | 0.841 | 0.568 |
+| Balanced Extra Trees | 0.631 ± 0.049 | 84.00% | 62.69% | 85.71% | 72.41% | 0.850 | 0.560 |
+| Balanced Random Forest | 0.603 ± 0.056 | 82.00% | 59.15% | 85.71% | 70.00% | 0.850 | 0.551 |
+
+The audit did not treat the XGBoost accuracy result as proof of generalisable improvement. Its cross-validation PR-AUC was below HGB's, and independent validation on a larger or temporal dataset is still required.
+
+Additional charts are available under [reports/checkpoint_c_v2/](reports/checkpoint_c_v2/): confusion matrix, ROC, precision-recall, calibration, and SHAP summary images.
+
+## Explainable AI
+
+SHAP functionality is implemented in [src/explainability.py](src/explainability.py). It explains the actual transformed features consumed by the model, including one-hot encoded categorical features where applicable. The dashboard exposes global mean absolute SHAP importance, local positive contributions, local negative contributions, and a plain-language summary.
+
+SHAP values describe model associations and are not causal explanations. The strong observed signals for `incident_severity_Major Damage`, `insured_hobbies_chess`, and `insured_hobbies_cross-fit` should be investigated for sampling artefacts, proxy effects, and fairness risks before any operational use.
+
+## System architecture
+
+```mermaid
+flowchart LR
+    A[insurance_claims.csv] --> B[Schema and quality validation]
+    B --> C[ClaimFeatureEngineer]
+    C --> D[ColumnTransformer]
+    D --> E[HistGradientBoostingClassifier]
+    E --> F[Isotonic calibration]
+    F --> G[Frozen threshold 0.18]
+    G --> H[Risk estimate]
+    H --> I[SHAP explanation]
+    H --> J[Streamlit dashboard]
 ```
+
+The inference path loads the complete saved bundle through [src/predict.py](src/predict.py). The target column is excluded from prediction inputs.
+
+## Streamlit dashboard
+
+The entrypoint is [app/app.py](app/app.py). It provides:
+
+- **Overview:** dataset counts, fraud rate, selected model, and key metrics.
+- **Claim risk prediction:** validated single-claim form with probability and risk category.
+- **Batch screening:** CSV upload without requiring target labels and downloadable scored output.
+- **Explainability:** global and individual SHAP contributions.
+- **Model performance:** confusion matrix, ROC, precision-recall, calibration, and saved metrics.
+- **Data quality:** missing-token counts, duplicates, validation warnings, and missing-value summaries.
+
+The UI labels outputs as risk assessments for investigation prioritisation. It does not call Gemini, an LLM, or an external generative-AI service.
+
+## Repository structure
+
+```text
 insurance-claim-risk/
-├── data/
-│   ├── insurance_claims.csv              # original dataset (1,000 claims, 39 fields)
-│   ├── insurance_claims_cleaned.csv      # after notebook 1
-│   └── insurance_claims_features.csv     # after notebook 3
-├── notebooks/
-│   ├── 01_data_understanding_cleaning.ipynb   # column dictionary, missing values, leakage
-│   ├── 02_eda.ipynb                           # 7 visual analyses + interpretations
-│   ├── 03_feature_engineering.ipynb           # 9 engineered features, justified
-│   └── 04_modeling_explainability.ipynb       # models, metrics, SHAP, saves the final model
-├── models/
-│   ├── fraud_model.pkl                   # trained Random Forest
-│   ├── feature_columns.pkl               # exact column order the model expects
-│   └── categorical_columns.pkl
-├── app/
-│   └── app.py                            # Streamlit app (scoring, SHAP, AI summaries)
+├── app/app.py
+├── data/insurance_claims.csv
+├── docs/                 # data, model, explainability, dashboard, and audit documentation
+├── models/               # versioned and legacy serialized model files
+├── notebooks/            # original exploratory and baseline notebooks
+├── reports/              # checkpoint C, F, and G outputs
+├── src/                  # validation, features, preprocessing, modeling, SHAP, inference
+├── tests/                # pytest suite
 ├── requirements.txt
 ├── .gitignore
 └── README.md
 ```
 
-## Quick start
+Important files include [models/claim_risk_pipeline_v2.joblib](models/claim_risk_pipeline_v2.joblib), [src/modeling.py](src/modeling.py), [src/robustness_audit.py](src/robustness_audit.py), and [app/app.py](app/app.py). The dashboard explicitly loads `claim_risk_pipeline_v2.joblib`.
 
-### 1. Clone and set up a virtual environment
-```bash
-git clone https://github.com/deedpak/insurance-claim-risk.git
-cd insurance-claim-risk
-python -m venv venv
+## Installation on Windows
 
-venv\Scripts\activate        # Windows
-source venv/bin/activate     # macOS / Linux
+```powershell
+cd C:\Users\dhill\insurance-claim-risk
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-### 2. Install dependencies
-```bash
-pip install -r requirements.txt
+If PowerShell blocks activation, use the environment interpreter directly:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-### 3. (Optional) Regenerate the pipeline from scratch
-The trained model is already included in `models/`, so this step is optional. To rebuild it yourself, open each notebook in order and run all cells:
+No API key, credential, or `.env` file is required.
+
+## Running the project
+
+### Start the dashboard
+
+```powershell
+.venv\Scripts\python.exe -m streamlit run app/app.py
 ```
-01_data_understanding_cleaning.ipynb   →  02_eda.ipynb   →  03_feature_engineering.ipynb   →  04_modeling_explainability.ipynb
+
+If port 8501 is occupied:
+
+```powershell
+.venv\Scripts\python.exe -m streamlit run app/app.py --server.port 8502
 ```
 
-### 4. Set your Gemini API key (for live AI explanations)
-Free key: [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+The dashboard uses the saved production artifact and does not retrain at startup.
 
-```bash
-setx GEMINI_API_KEY "your-key-here"          # Windows, persists across sessions
-export GEMINI_API_KEY="your-key-here"        # macOS / Linux
+### Run the read-only robustness audit
+
+```powershell
+.venv\Scripts\python.exe -m src.robustness_audit
 ```
-Without a key, the app still works fully — it falls back to a clear rule-based summary instead of a live AI-generated one.
 
-### 5. Run the app
-```bash
-streamlit run app/app.py
+Audit outputs are written to `reports/checkpoint_g/` without replacing the production artifact.
+
+### Reproduce model development
+
+```powershell
+.venv\Scripts\python.exe -m src.modeling
 ```
-Open the printed URL (usually `http://localhost:8501`) and upload `data/insurance_claims.csv`.
 
-## Model performance
+The training command refuses to overwrite an existing artifact. Use a new versioned output path for any new experiment.
 
-Final model: **Random Forest** (`class_weight='balanced'`, 5-fold cross-validated).
+## Testing
 
-| Model | Precision | Recall | F1 | ROC-AUC |
-|---|---|---|---|---|
-| Baseline (majority class) | — | 0.00 | — | 0.50 |
-| Logistic Regression | see notebook 4 | | | |
-| **Random Forest (final)** | see notebook 4 | | | |
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
 
-*(Exact figures are in `notebooks/04_modeling_explainability.ipynb`, computed on a held-out 20% test set the model never saw during training.)*
+The tests cover schema validation, missing-value handling, feature engineering, preprocessing, artifact loading, prediction validation, SHAP alignment, and dashboard startup. The last verified run completed with **13 passed**.
 
-**Why not just use accuracy?** Roughly 1 in 4 claims in this dataset is fraudulent. A model that always predicts "genuine" would already look ~75% accurate while catching zero fraud — so evaluation here is based on precision, recall, F1, and ROC-AUC instead.
+## Security and data handling
 
-## Key design decisions
+The audit found no `.env` files and no API keys, passwords, access tokens, or credential values in project source. The [`.gitignore`](.gitignore) excludes environment files, credentials, keys, virtual environments, caches, and local CSV/XLSX data by default.
 
-- **Data leakage guarded against**: `policy_number`, `insured_zip`, and `incident_location` are dropped before modelling — unique identifiers that would let the model memorise records instead of learning generalisable patterns.
-- **Class imbalance**: handled via `class_weight='balanced'` rather than naive oversampling, keeping the training distribution honest.
-- **Schema differences from the assignment brief**: this real dataset doesn't include a few fields the brief's *example* schema lists (a separate claim-submission date, a previous-claim-count field, separate repair-estimate/invoice fields). Where this happened, the closest available proxy was used and documented inline in the relevant notebook (e.g. policy tenure at incident time as a stand-in for submission delay).
-- **AI explanation boundaries**: the LLM receives only the model's numeric output — risk probability, category, and named SHAP factors — never raw claim text. It's explicitly prompted not to make a fraud determination, only to explain the model's signals, and the app labels every AI output as "not a decision" in the UI.
+The dataset contains claim-level records and should be treated as potentially sensitive. Do not publish additional private data, identifiers, credentials, or unverified dataset copies. Confirm the dataset licence and obtain the necessary permissions before redistribution.
 
-## Tech stack
+## Limitations
 
-**Python** · **pandas** / **NumPy** — data wrangling
-**scikit-learn** — modelling (Logistic Regression, Random Forest)
-**SHAP** — per-prediction explainability
-**Streamlit** — interactive web app
-**Google Gemini API** — generative AI investigator summaries
+- The dataset has only 1,000 records and 247 positive labels.
+- The held-out evaluation contains 200 records and 49 fraud cases, so metrics are sensitive to a small number of claims.
+- There is no external, temporal, prospective, or multi-insurer validation.
+- The source data contains one invalid incident/policy date ordering and missing-value tokens.
+- Isotonic calibration was selected using a relatively small training-side validation sample; calibrated probabilities should not be treated as proven real-world probabilities.
+- Hobby-related features may be spurious or proxy variables and require dedicated fairness and stability analysis.
+- SHAP does not establish causation.
+- A model score is not proof of fraud and must not be used as the sole basis for claim denial, accusation, or adverse treatment.
+- Dataset provenance and licence were not verified as part of this local repository audit.
 
-## Possible next steps
+See [docs/FINAL_PROJECT_LIMITATIONS.md](docs/FINAL_PROJECT_LIMITATIONS.md) and [docs/STATISTICAL_VALIDATION.md](docs/STATISTICAL_VALIDATION.md) for the full robustness discussion.
 
-- Hyperparameter tuning (GridSearch/Optuna) on the Random Forest
-- XGBoost as a fourth model for comparison
-- Batch AI summaries (one Gemini call per upload instead of per claim view) to reduce latency
-- User authentication for the Streamlit app before any real deployment
+## Future enhancements
 
----
+- Validate on a larger, independently sourced and temporally separated dataset.
+- Monitor calibration, drift, subgroup performance, and false-negative rates.
+- Investigate the stability and acceptability of hobby-related predictors.
+- Establish pre-registered threshold and model-selection criteria for future studies.
+- Establish data governance, access controls, retention rules, and audit trails.
+- Add prospective human-review outcomes and feedback-loop monitoring.
+- Reassess calibration with a larger representative calibration sample.
 
-Built by **Deepak**.
+## Responsible AI
+
+This is an academic research prototype. A flagged claim should receive additional human review, not automatic adverse treatment. Reviewers should consider the model output alongside claim evidence, policy context, and applicable law and organisational policy. Model explanations are aids for questioning and review; they should not be interpreted as causal proof or as a substitute for investigation.
+
+## Author
+
+**Ms. S. Shaheen**
+
+Final-Year M.Tech Project
+
+Annamacharya Institute of Technology and Sciences
+
+Tirupati, Andhra Pradesh, India
+
+## Git commands for review and publication
+
+These commands are provided for the author to review and run manually. No push was performed by this task:
+
+```powershell
+git status
+git add README.md
+git diff --cached
+git commit -m "Update README with complete project documentation"
+git push origin main
+```
